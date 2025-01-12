@@ -168,11 +168,11 @@ jobs:
     
     - name: Docker Build
       run: |
-        docker build -t nicohs12/lab-devsecops .
+        docker build -t fbrunar/laboratorio-final-fbruna .
 
     - name: Push Docker
       run: |
-        docker push nicohs12/lab-devsecops
+        docker push fbrunar/laboratorio-final-fbruna
 
   Image-Security:
     needs: Docker-Build
@@ -200,7 +200,7 @@ jobs:
       with:
         scan-type: "image"
         format: 'table'
-        image-ref: 'nicohs12/lab-devsecops'
+        image-ref: 'fbrunar/laboratorio-final-fbruna'
         severity: HIGH,CRITICAL
         ignore-unfixed: true
         exit-code: 0 # 1
@@ -223,11 +223,11 @@ jobs:
       
       - name: Pull Docker
         run: |
-          docker pull nicohs12/lab-devsecops
+          docker pull fbrunar/laboratorio-final-fbruna
       
       - name: Detiene-Elimina Container Existente
         run: |
-          $containerName = "lab-final-Nicolas-Huly"
+          $containerName = "container-fbruna"
           $containerStatus = docker ps -a  --filter "name=$containerName" --format "{{.Names}}"
 
           if ($containerStatus -eq $containerName) {
