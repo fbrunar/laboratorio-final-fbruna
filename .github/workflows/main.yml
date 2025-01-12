@@ -192,7 +192,7 @@ jobs:
     
     - name: Pull Docker
       run: |
-        docker pull nicohs12/lab-devsecops
+        docker pull fbrunar/laboratorio-final-fbruna
 
     - name: Run Trivy
       uses: aquasecurity/trivy-action@master
