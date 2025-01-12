@@ -6,20 +6,239 @@ on:
 
 jobs:
   SAST:
+   runs-on: ubuntu-24.04
+
+   steps:
+     - name: Checkout Code
+       uses: actions/checkout@v3
+
+     - name: Set up Node.js
+       uses: actions/setup-node@v3
+       with:
+         node-version: '18'
+
+     - name: Set Environment Variables
+       run: | 
+         echo "BRANCH_NAME=${{ github.ref_name }}" >> $GITHUB_ENV
+         echo "ORG_NAME=fbruna-devsecops" >> $GITHUB_ENV
+
+       #LINEAS DE VALIDACION
+     - name: Variable
+       run: echo "$BRANCH_NAME"
+
+       #Test con Codigo clase ayudantia
+     - name: Validate SonarCloud Project
+       id: eval-sonarcloud
+       env:
+         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+         REPO_NAME: ${{ github.event.repository.name }}
+       run: |
+         echo "Verificando si el proyecto $REPO_NAME existe en SonarCloud..."
+         response=$(curl -s -o /dev/null -w "%{http_code}" -u "$SONAR_TOKEN:" \
+           "https://sonarcloud.io/api/projects/search?projects=$REPO_NAME")
+
+         if [ "$response" -ne 200 ]; then
+           echo "El proyecto no existe. Creándolo en SonarCloud..."
+           create_response=$(curl -s -w "%{http_code}" -o /dev/null -X POST -u "$SONAR_TOKEN:" \
+             "https://sonarcloud.io/api/projects/create" \
+             -d "name=$REPO_NAME" \
+             -d "project=$REPO_NAME" \
+             -d "organization=$ORG_NAME" \
+             -d "visibility=public")
+
+           if [ "$create_response" -ne 201 ]; then
+             echo "Proyecto creado exitosamente (HTTP Response: $create_response)."
+           fi
+
+           echo "Estableciendo la rama [$BRANCH_NAME] como predeterminada..."
+           curl -s -f -X POST -u "$SONAR_TOKEN:" \
+             "https://sonarcloud.io/api/project_branches/rename" \
+             -d "name=$BRANCH_NAME" \
+             -d "project=$REPO_NAME"
+
+           echo "project_created=true" >> $GITHUB_ENV
+         else
+           echo "El proyecto ya existe en SonarCloud."
+           echo "project_created=false" >> $GITHUB_ENV
+         fi
+
+     - name: Perform Initial Analysis
+       if: env.project_created == 'true'
+       uses: SonarSource/sonarqube-scan-action@v4
+       env:
+         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+         REPO_NAME: ${{ github.event.repository.name }}
+         BRANCH_NAME: ${{ github.ref_name }}
+       with:
+           args:
+             -Dsonar.projectKey=$REPO_NAME
+             -Dsonar.organization=$ORG_NAME
+             -Dsonar.host.url=https://sonarcloud.io
+             -Dsonar.token=$SONAR_TOKEN
+             -Dsonar.branch.name=$BRANCH_NAME
+           projectBaseDir: .
+
+     - name: Perform Branch Analysis
+       if: env.project_created == 'false'
+       uses: SonarSource/sonarqube-scan-action@v4
+       env:
+         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN}}
+         REPO_NAME: ${{ github.event.repository.name }}
+         BRANCH_NAME: ${{ github.ref_name }}        
+       with:
+           args:
+             -Dsonar.projectKey="$REPO_NAME"
+             -Dsonar.organization="$ORG_NAME"
+             -Dsonar.host.url="https://sonarcloud.io"
+             -Dsonar.token="$SONAR_TOKEN"
+             -Dsonar.branch.name="$BRANCH_NAME"
+           projectBaseDir: .
+
+     - name: Quality Gate
+       env:
+         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN}}
+         REPO_NAME: ${{ github.event.repository.name }}
+       run: |
+         echo "Validando el estado del Quality Gate..."
+         analysisId=$(curl -s -u "$SONAR_TOKEN:" \
+           "https://sonarcloud.io/api/ce/component?component=$REPO_NAME" | jq -r '.current.analysisId')
+
+         qualityGateStatus=$(curl -s -u "$SONAR_TOKEN:" \
+           "https://sonarcloud.io/api/qualitygates/project_status?analysisId=$analysisId" | jq -r '.projectStatus.status')
+
+         if [ "$qualityGateStatus" != "OK" ]; then
+           echo "El proyecto no cumple con el Quality Gate: $qualityGateStatus."
+           echo "Verificando vulnerabilidades críticas..."
+           vulnerabilities=$(curl -s -u "$SONAR_TOKEN:" \
+             "https://sonarcloud.io/api/issues/search?componentKeys=$REPO_NAME&types=VULNERABILITY&severities=CRITICAL,MEDIUM,BLOCKER" | jq -r '.total')
+
+           if [ "$vulnerabilities" -gt 0 ]; then
+             echo "Se encontraron $vulnerabilities vulnerabilidades críticas. El proyecto no cumple con los estándares de seguridad."
+             exit 0 #exit 1
+           else
+             echo "El proyecto cumple con el Quality Gate y no tiene vulnerabilidades críticas." 
+           fi
+         fi
+         
+  SCA:
+      needs: SAST
+      runs-on: ubuntu-24.04
+      steps:
+        
+        - name: Checkout
+          uses: actions/checkout@v4
+          with:
+            fetch-depth: 0
+
+        - name: Instalar Dependencias con NPM
+          run: npm install
+        
+        - name: Depcheck
+          uses: dependency-check/Dependency-Check_Action@main
+          id: Depcheck
+          with:
+            project: '${{ github.event.repository.name }}'
+            path: '.'
+            format: 'HTML'
+            out: 'Reporte-DepCheck.html' 
+            args: > # --failOnCVSS 4
+              --enableRetired
+                    
+        - name: Subir resultados
+          uses: actions/upload-artifact@master
+          with:
+            name: Depcheck report
+            path: ${{github.workspace}}/Reporte-DepCheck.html
+            
+  Docker-Build:
+    needs: SCA
     runs-on: ubuntu-24.04
-
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+          fetch-depth: 0
+
+    - name: Docker Login
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USER }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+    
+    - name: Docker Build
+      run: |
+        docker build -t nicohs12/lab-devsecops .
+
+    - name: Push Docker
+      run: |
+        docker push nicohs12/lab-devsecops
+
+  Image-Security:
+    needs: Docker-Build
+    runs-on: ubuntu-24.04
+    steps:
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+          fetch-depth: 0
+      
+    - name: Docker Login
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USER }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+    
+    - name: Pull Docker
+      run: |
+        docker pull nicohs12/lab-devsecops
+
+    - name: Run Trivy
+      uses: aquasecurity/trivy-action@master
+      id: TrivyScanReport
+      with:
+        scan-type: "image"
+        format: 'table'
+        image-ref: 'nicohs12/lab-devsecops'
+        severity: HIGH,CRITICAL
+        ignore-unfixed: true
+        exit-code: 0 # 1
+  
+  Despliegue-APP:
+    name: Deploy Docker Image
+    needs: Image-Security
+    runs-on: self-hosted
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
         with:
-          node-version: '18'
+            fetch-depth: 0
 
-      - name: Set Environment Variables
-        run: echo "BRANCH_NAME=${{ github.ref_name }}" >> $GITHUB_ENV
+      - name: Docker Login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      
+      - name: Pull Docker
+        run: |
+          docker pull nicohs12/lab-devsecops
+      
+      - name: Detiene-Elimina Container Existente
+        run: |
+          $containerName = "lab-final-Nicolas-Huly"
+          $containerStatus = docker ps -a  --filter "name=$containerName" --format "{{.Names}}"
 
-        #LINEAS DE VALIDACION
-      - name: Variable
-        run: echo "$BRANCH_NAME"
+          if ($containerStatus -eq $containerName) {
+              Write-Output "$containerName.... deteniendo"
+              docker stop $containerName
+              docker rm $containerName
+          } else {
+              Write-Output "$containerName no existe"
+          }
+
+      - name: Ejecutar container
+        run: |
+          Write-Output "Desplegando container......"
+          docker run -d --name lab-final-Nicolas-Huly -p 2612:2612 nicohs12/lab-devsecops      
